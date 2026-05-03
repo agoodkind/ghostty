@@ -2538,6 +2538,9 @@ pub const Scroll = union(enum) {
 pub fn scroll(self: *PageList, behavior: Scroll) void {
     defer self.assertIntegrity();
     defer self.enforceResidentWindow() catch {};
+    defer self.ensureViewportResident() catch {
+        self.viewport = .active;
+    };
 
     // Special case no-scrollback mode to never allow scrolling.
     if (self.explicit_max_size == 0) {
@@ -3236,7 +3239,7 @@ fn ensureNodeResident(self: *PageList, node: *List.Node) !void {
 
     node.data = .initBuf(.init(page_buf), layout);
     node.data.size = unloaded.size;
-    node.data.dirty = unloaded.dirty;
+    node.data.dirty = true;
     node.unloaded = null;
     self.page_size += page_buf.len;
 }
@@ -3247,6 +3250,40 @@ fn nodeHasTrackedPins(self: *const PageList, node: *const List.Node) bool {
         if (tracked.node == node) return true;
     }
     return false;
+}
+
+fn nodeIsInViewport(self: *const PageList, node: *const List.Node) bool {
+    const top = self.getTopLeft(.viewport);
+    var current: ?*List.Node = top.node;
+    var remaining = self.rows;
+
+    while (current) |n| : (current = n.next) {
+        const row_count = n.rowCount();
+        const visible_rows = if (n == top.node) row_count - top.y else row_count;
+        if (visible_rows == 0) continue;
+        if (n == node) return true;
+
+        if (remaining <= visible_rows) return false;
+        remaining -= visible_rows;
+    }
+
+    return false;
+}
+
+fn ensureViewportResident(self: *PageList) !void {
+    const top = self.getTopLeft(.viewport);
+    var current: ?*List.Node = top.node;
+    var remaining = self.rows;
+
+    while (current) |node| : (current = node.next) {
+        const row_count = node.rowCount();
+        const visible_rows = if (node == top.node) row_count - top.y else row_count;
+        if (visible_rows == 0) continue;
+        try self.ensureNodeResident(node);
+
+        if (remaining <= visible_rows) return;
+        remaining -= visible_rows;
+    }
 }
 
 fn enforceResidentWindow(self: *PageList) Allocator.Error!void {
@@ -3262,7 +3299,7 @@ fn enforceResidentWindow(self: *PageList) Allocator.Error!void {
         if (current == self.pages.last.?) continue;
         kept_size += current.data.memory.len;
         if (kept_size <= self.scrollback_window_limit or current == active_top.node) continue;
-        if (current == self.viewport_pin.node) continue;
+        if (self.nodeIsInViewport(current)) continue;
         if (self.nodeHasTrackedPins(current)) continue;
         if (self.viewport == .top and current == self.pages.first.?) continue;
         self.unloadNode(current) catch |err| switch (err) {
@@ -7236,6 +7273,49 @@ test "PageList resident window reloads top viewport" {
 
     try testing.expect(s.viewport == .top);
     try testing.expect(s.pages.first.?.resident());
+}
+
+test "PageList resident window reloads full viewport while scrolling" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try initWithScrollbackWindow(alloc, 80, 24, null, PagePool.item_size);
+    defer s.deinit();
+
+    try s.growRows(4096);
+    try testing.expect(s.unloadedRows() > 0);
+
+    s.scroll(.{ .top = {} });
+    s.scroll(.{ .delta_row = @intCast(s.pages.first.?.rowCount() - 2) });
+
+    const top = s.getTopLeft(.viewport);
+    var node: ?*List.Node = top.node;
+    var remaining = s.rows;
+    while (node) |current| : (node = current.next) {
+        const row_count = current.rowCount();
+        const visible_rows = if (current == top.node) row_count - top.y else row_count;
+        if (visible_rows == 0) continue;
+        try testing.expect(current.resident());
+        if (remaining <= visible_rows) break;
+        remaining -= visible_rows;
+    }
+}
+
+test "PageList resident window marks reloaded page dirty" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try initWithScrollbackWindow(alloc, 80, 24, null, PagePool.item_size);
+    defer s.deinit();
+
+    try s.growRows(4096);
+    s.clearDirty();
+    try testing.expect(!s.pages.first.?.resident());
+
+    s.scroll(.{ .top = {} });
+
+    try testing.expect(s.pages.first.?.resident());
+    try testing.expect(s.pages.first.?.data.dirty);
 }
 
 test "PageList resident window reset clears unloaded state" {
