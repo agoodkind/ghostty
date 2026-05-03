@@ -1,35 +1,3 @@
-const std = @import("std");
-const Allocator = std.mem.Allocator;
-const ArenaAllocator = std.heap.ArenaAllocator;
-const builtin = @import("builtin");
-
-const help_strings = @import("help_strings");
-
-const build_config = @import("../build_config.zig");
-const cli = @import("../cli.zig");
-const deepEqual = @import("../datastruct/comparison.zig").deepEqual;
-const fontpkg = @import("../font/main.zig");
-const MetricModifier = fontpkg.Metrics.Modifier;
-const inputpkg = @import("../input.zig");
-const KeyRemapSet = @import("../input/key_mods.zig").RemapSet;
-const internal_os = @import("../os/main.zig");
-const assert = @import("../quirks.zig").inlineAssert;
-pub const WindowPaddingBalance = @import("../renderer/size.zig").PaddingBalance;
-const ClipboardCodepointMap = @import("ClipboardCodepointMap.zig");
-pub const Command = @import("command.zig").Command;
-const conditional = @import("conditional.zig");
-const Conditional = conditional.Conditional;
-const file_load = @import("file_load.zig");
-const formatterpkg = @import("formatter.zig");
-pub const Key = @import("key.zig").Key;
-pub const Path = @import("path.zig").Path;
-pub const RepeatablePath = @import("path.zig").RepeatablePath;
-const RepeatableReadableIO = @import("io.zig").RepeatableReadableIO;
-const RepeatableStringMap = @import("RepeatableStringMap.zig");
-const string = @import("string.zig");
-const themepkg = @import("theme.zig");
-const url = @import("url.zig");
-
 /// Config is the main config struct. These fields map directly to the
 /// CLI flag names hence we use a lot of `@""` syntax to support hyphens.
 
@@ -42,7 +10,38 @@ const url = @import("url.zig");
 
 const Config = @This();
 
+const std = @import("std");
+const builtin = @import("builtin");
+const build_config = @import("../build_config.zig");
+const assert = @import("../quirks.zig").inlineAssert;
+const Allocator = std.mem.Allocator;
+const ArenaAllocator = std.heap.ArenaAllocator;
 const global_state = &@import("../global.zig").state;
+const deepEqual = @import("../datastruct/comparison.zig").deepEqual;
+const fontpkg = @import("../font/main.zig");
+const inputpkg = @import("../input.zig");
+const internal_os = @import("../os/main.zig");
+const cli = @import("../cli.zig");
+
+const conditional = @import("conditional.zig");
+const Conditional = conditional.Conditional;
+const file_load = @import("file_load.zig");
+const formatterpkg = @import("formatter.zig");
+const themepkg = @import("theme.zig");
+const url = @import("url.zig");
+pub const Key = @import("key.zig").Key;
+const MetricModifier = fontpkg.Metrics.Modifier;
+const help_strings = @import("help_strings");
+pub const Command = @import("command.zig").Command;
+const RepeatableReadableIO = @import("io.zig").RepeatableReadableIO;
+const RepeatableStringMap = @import("RepeatableStringMap.zig");
+pub const Path = @import("path.zig").Path;
+pub const RepeatablePath = @import("path.zig").RepeatablePath;
+const ClipboardCodepointMap = @import("ClipboardCodepointMap.zig");
+const KeyRemapSet = @import("../input/key_mods.zig").RemapSet;
+pub const WindowPaddingBalance = @import("../renderer/size.zig").PaddingBalance;
+const string = @import("string.zig");
+
 // We do this instead of importing all of terminal/main.zig to
 // limit the dependency graph. This is important because some things
 // like the `ghostty-build-data` binary depend on the Config but don't
