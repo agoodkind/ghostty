@@ -34,9 +34,6 @@ const log = std.log.scoped(.page_list);
 /// window to scroll into quickly.
 const page_preheat = 4;
 
-/// The number of rows to keep resident for unlimited scrollback.
-pub const resident_window_rows: usize = 10_000;
-
 /// The list of pages in the screen. These are expected to be in order
 /// where the first page is the topmost page (scrollback) and the last is
 /// the bottommost page (the current active page).
@@ -159,29 +156,33 @@ page_serial: u64,
 /// for quick comparisons to find invalid pages in references.
 page_serial_min: u64,
 
-/// Byte size of the total amount of allocated pages. Note this does
+/// Byte size of the total amount of resident pages. Note this does
 /// not include the total allocated amount in the pool which may be more
 /// than this due to preheating.
 page_size: usize,
+
+/// Byte size of all retained pages, including pages backed by the scrollback
+/// store.
+total_page_size: usize,
 
 /// Maximum size of the page allocation in bytes. This only includes pages
 /// that are used ONLY for scrollback. If the active area is still partially
 /// in a page that also includes scrollback, then that page is not included.
 explicit_max_size: usize,
 
+/// The number of bytes of scrollback to keep resident in memory.
+scrollback_window_limit: usize,
+
 /// This is the minimum max size that we will respect due to the rows/cols
 /// of the PageList. We must always be able to fit at least the active area
 /// and at least two pages for our algorithms.
 min_max_size: usize,
 
-/// Whether this PageList was configured for unlimited scrollback.
-unlimited_scrollback: bool,
-
 /// The total number of rows represented by this PageList. This is used
 /// specifically for scrollbar information so we can have the total size.
 total_rows: usize,
 
-/// Store for page buffers unloaded from unlimited scrollback.
+/// Store for page buffers unloaded from the resident scrollback window.
 scrollback_store: ?ScrollbackStore = null,
 /// The list of tracked pins. These are kept up to date automatically.
 tracked_pins: PinSet,
@@ -363,7 +364,7 @@ const init_tw = tripwire.module(enum {
     init_pages,
     viewport_pin,
     viewport_pin_track,
-}, init);
+}, initWithScrollbackWindow);
 
 /// Initialize the page. The top of the first page in the list is always the
 /// top of the active area of the screen (important knowledge for quickly
@@ -386,6 +387,16 @@ pub fn init(
     cols: size.CellCountInt,
     rows: size.CellCountInt,
     max_size: ?usize,
+) Allocator.Error!PageList {
+    return initWithScrollbackWindow(alloc, cols, rows, max_size, 0);
+}
+
+pub fn initWithScrollbackWindow(
+    alloc: Allocator,
+    cols: size.CellCountInt,
+    rows: size.CellCountInt,
+    max_size: ?usize,
+    scrollback_window_limit: usize,
 ) Allocator.Error!PageList {
     const tw = init_tw;
 
@@ -431,9 +442,13 @@ pub fn init(
         .page_serial = page_serial,
         .page_serial_min = 0,
         .page_size = page_size,
+        .total_page_size = page_size,
         .explicit_max_size = max_size orelse std.math.maxInt(usize),
+        .scrollback_window_limit = if (max_size) |v|
+            @min(v, scrollback_window_limit)
+        else
+            scrollback_window_limit,
         .min_max_size = min_max_size,
-        .unlimited_scrollback = max_size == null,
         .total_rows = rows,
         .scrollback_store = null,
         .tracked_pins = tracked_pins,
@@ -770,6 +785,7 @@ pub fn reset(self: *PageList) void {
         self.cols,
         self.rows,
     ) catch @panic("initPages failed");
+    self.total_page_size = self.page_size;
 
     // Our total rows always goes back to the default
     self.total_rows = self.rows;
@@ -925,9 +941,10 @@ pub fn clone(
         .page_serial = page_serial,
         .page_serial_min = 0,
         .page_size = page_size,
+        .total_page_size = page_size,
         .explicit_max_size = self.explicit_max_size,
+        .scrollback_window_limit = self.scrollback_window_limit,
         .min_max_size = self.min_max_size,
-        .unlimited_scrollback = self.unlimited_scrollback,
         .cols = self.cols,
         .rows = self.rows,
         .total_rows = total_rows,
@@ -3130,11 +3147,6 @@ fn fixupViewport(
     }
 }
 
-pub fn configMaxSize(self: *const PageList) ?usize {
-    if (self.unlimited_scrollback) return null;
-    return self.explicit_max_size;
-}
-
 /// Returns the actual max size. This may be greater than the explicit
 /// value if the explicit value is less than the min_max_size.
 ///
@@ -3147,7 +3159,7 @@ pub fn maxSize(self: *const PageList) usize {
 }
 
 /// Count resident rows in the pagelist. This is intended for tests and
-/// assertions around unlimited scrollback residency.
+/// assertions around scrollback window residency.
 pub fn residentRows(self: *const PageList) usize {
     var rows: usize = 0;
     var node = self.pages.first;
@@ -3159,7 +3171,7 @@ pub fn residentRows(self: *const PageList) usize {
 }
 
 /// Count unloaded rows in the pagelist. This is intended for tests and
-/// diagnostics around unlimited scrollback residency.
+/// diagnostics around scrollback window residency.
 pub fn unloadedRows(self: *const PageList) usize {
     var rows: usize = 0;
     var node = self.pages.first;
@@ -3237,28 +3249,19 @@ fn nodeHasTrackedPins(self: *const PageList, node: *const List.Node) bool {
     return false;
 }
 
-fn ensureAllPagesResident(self: *PageList) void {
-    var node = self.pages.first;
-    while (node) |current| : (node = current.next) {
-        self.ensureNodeResident(current) catch return;
-    }
-}
-
 fn enforceResidentWindow(self: *PageList) Allocator.Error!void {
-    if (!self.unlimited_scrollback) return;
+    if (self.scrollback_window_limit == 0) return;
     if (builtin.os.tag != .linux and !builtin.os.tag.isDarwin()) return;
-    if (self.total_rows <= self.rows + resident_window_rows) return;
-
-    self.ensureAllPagesResident();
+    if (self.page_size <= self.min_max_size + self.scrollback_window_limit) return;
 
     const active_top = self.getTopLeft(.active);
-    var kept_rows: usize = 0;
+    var kept_size: usize = 0;
     var node = self.pages.last;
     while (node) |current| : (node = current.prev) {
         if (current.unloaded != null) continue;
         if (current == self.pages.last.?) continue;
-        kept_rows += current.data.size.rows;
-        if (kept_rows <= resident_window_rows or current == active_top.node) continue;
+        kept_size += current.data.memory.len;
+        if (kept_size <= self.scrollback_window_limit or current == active_top.node) continue;
         if (current == self.viewport_pin.node) continue;
         if (self.nodeHasTrackedPins(current)) continue;
         if (self.viewport == .top and current == self.pages.first.?) continue;
@@ -3308,13 +3311,14 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
     // initial allocation.
     if (self.pages.first != null and
         self.pages.first != self.pages.last and
-        self.page_size + PagePool.item_size > self.maxSize())
+        self.total_page_size + PagePool.item_size > self.maxSize())
     prune: {
         const first = self.pages.popFirst().?;
         assert(first != last);
 
         // Decrease our total row count from the pruned page
-        self.total_rows -= first.data.size.rows;
+        const first_rows = first.rowCount();
+        self.total_rows -= first_rows;
 
         // If our total row count is now less than our required
         // rows then we can't prune. The "+ 1" is because we'll add one
@@ -3322,7 +3326,7 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
         if (self.total_rows + 1 < self.rows) {
             self.pages.prepend(first);
             assert(self.pages.first == first);
-            self.total_rows += first.data.size.rows;
+            self.total_rows += first_rows;
             break :prune;
         }
 
@@ -3331,14 +3335,14 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
             if (self.viewport_pin_row_offset) |*v| {
                 // If our offset is less than the number of rows in the
                 // pruned page, then we are now at the top.
-                if (v.* < first.data.size.rows) {
+                if (v.* < first_rows) {
                     self.viewport = .top;
                     break :viewport;
                 }
 
                 // Otherwise, our viewport pin is below what we pruned
                 // so we just decrement our offset.
-                v.* -= first.data.size.rows;
+                v.* -= first_rows;
             }
         }
 
@@ -3355,6 +3359,10 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
         self.viewport_pin.garbage = false;
 
         // Non-standard pages can't be reused, just destroy them.
+        self.ensureNodeResident(first) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => break :prune,
+        };
         if (first.data.memory.len > std_size) {
             self.destroyNode(first);
             break :prune;
@@ -3536,12 +3544,15 @@ inline fn createPage(
     cap: Capacity,
 ) Allocator.Error!*List.Node {
     // log.debug("create page cap={}", .{cap});
-    return try createPageExt(
+    const old_page_size = self.page_size;
+    const node = try createPageExt(
         &self.pool,
         cap,
         &self.page_serial,
         &self.page_size,
     );
+    self.total_page_size += self.page_size - old_page_size;
+    return node;
 }
 
 inline fn createPageExt(
@@ -3609,7 +3620,15 @@ inline fn createPageExt(
 /// responsible for accounting for the removed rows. This function only
 /// updates `page_size` (byte accounting), not row accounting.
 fn destroyNode(self: *PageList, node: *List.Node) void {
+    if (node.unloaded) |unloaded| {
+        self.total_page_size -= unloaded.record.len;
+        self.pool.nodes.destroy(node);
+        return;
+    }
+
+    const page_size = node.data.memory.len;
     destroyNodeExt(&self.pool, node, &self.page_size);
+    self.total_page_size -= page_size;
 }
 
 fn destroyNodeExt(
@@ -7188,28 +7207,28 @@ test "PageList grow fit in capacity" {
     }
 }
 
-test "PageList unlimited scrollback unloads old rows" {
+test "PageList resident window unloads old rows" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try initWithScrollbackWindow(alloc, 80, 24, null, PagePool.item_size);
     defer s.deinit();
 
-    const grow_count = resident_window_rows * 3;
+    const grow_count = 4096;
     try s.growRows(grow_count);
 
     try testing.expect(s.unloadedRows() > 0);
     try testing.expect(s.residentRows() < s.total_rows);
 }
 
-test "PageList unlimited scrollback reloads top viewport" {
+test "PageList resident window reloads top viewport" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try initWithScrollbackWindow(alloc, 80, 24, null, PagePool.item_size);
     defer s.deinit();
 
-    const grow_count = resident_window_rows * 3;
+    const grow_count = 4096;
     try s.growRows(grow_count);
     try testing.expect(s.unloadedRows() > 0);
 
@@ -7219,14 +7238,14 @@ test "PageList unlimited scrollback reloads top viewport" {
     try testing.expect(s.pages.first.?.resident());
 }
 
-test "PageList unlimited scrollback reset clears unloaded state" {
+test "PageList resident window reset clears unloaded state" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, null);
+    var s = try initWithScrollbackWindow(alloc, 80, 24, null, PagePool.item_size);
     defer s.deinit();
 
-    const grow_count = resident_window_rows * 3;
+    const grow_count = 4096;
     try s.growRows(grow_count);
     try testing.expect(s.unloadedRows() > 0);
 
@@ -7236,14 +7255,14 @@ test "PageList unlimited scrollback reset clears unloaded state" {
     try testing.expectEqual(s.rows, s.total_rows);
 }
 
-test "PageList finite scrollback keeps all rows resident" {
+test "PageList zero resident window keeps all rows resident" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try init(alloc, 80, 24, std.math.maxInt(usize));
+    var s = try initWithScrollbackWindow(alloc, 80, 24, null, 0);
     defer s.deinit();
 
-    const grow_count = resident_window_rows * 3;
+    const grow_count = 4096;
     try s.growRows(grow_count);
 
     try testing.expectEqual(@as(usize, 0), s.unloadedRows());
@@ -13518,7 +13537,7 @@ test "PageList resize reflow less cols to wrap a multi-codepoint grapheme with a
         //
         // 👨‍👨‍👦‍👦👨‍👨‍👦‍👦
 
-        // First family emoji at (0, 0)
+        // First family emoji at (0)
         {
             const rac = page.getRowAndCell(0, 0);
             rac.cell.* = .{
@@ -13999,7 +14018,7 @@ test "PageList grow reuses non-standard page without leak" {
     try testing.expect(s.pages.first != s.pages.last);
 
     // Continue growing until we exceed max_size AND the last page is full
-    while (s.page_size + PagePool.item_size <= s.maxSize() or
+    while (s.total_page_size + PagePool.item_size <= s.maxSize() or
         s.pages.last.?.data.size.rows < s.pages.last.?.data.capacity.rows)
     {
         _ = try s.grow();
@@ -14053,7 +14072,7 @@ test "PageList grow non-standard page prune protection" {
     //
     // Bug trigger conditions (all must be true simultaneously):
     // 1. first page is non-standard (memory.len > std_size)
-    // 2. page_size + PagePool.item_size > maxSize() (triggers prune consideration)
+    // 2. total_page_size + PagePool.item_size > maxSize() (triggers prune consideration)
     // 3. pages.first != pages.last (have multiple pages)
     // 4. total_rows >= self.rows (have enough rows for active area)
     // 5. total_rows - first.size.rows + 1 < self.rows (prune would lose too many)
@@ -14099,7 +14118,7 @@ test "PageList grow non-standard page prune protection" {
 
     // Verify prune path conditions are met
     try testing.expect(s.pages.first != s.pages.last);
-    try testing.expect(s.page_size + PagePool.item_size > s.maxSize());
+    try testing.expect(s.total_page_size + PagePool.item_size > s.maxSize());
     try testing.expect(s.totalRows() >= s.rows);
 
     // Verify last page is at capacity (so grow must prune or allocate new)

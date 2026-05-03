@@ -1,5 +1,5 @@
-//! Measures resident and unloaded scrollback behavior for a PageList with
-//! deep unlimited scrollback.
+//! Measures resident and unloaded scrollback behavior for a PageList with a
+//! smaller resident scrollback window.
 //!
 //! Usage: ghostty-bench +scrollback-memory
 //!        ghostty-bench +scrollback-memory --total-rows=3000000 --scroll-passes=5
@@ -54,11 +54,12 @@ fn setup(ptr: *anyopaque) Benchmark.Error!void {
     const alloc = std.heap.page_allocator;
     const total: u32 = self.opts.@"total-rows";
 
-    self.page_list = PageList.init(
+    self.page_list = PageList.initWithScrollbackWindow(
         alloc,
         self.opts.cols,
         24,
-        null,
+        std.math.maxInt(usize),
+        10 * MiB,
     ) catch return error.BenchmarkFailed;
 
     const pl = &self.page_list.?;

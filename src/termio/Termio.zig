@@ -243,7 +243,8 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         break :opts .{
             .cols = grid_size.columns,
             .rows = grid_size.rows,
-            .max_scrollback = opts.full_config.@"scrollback-limit".maxSize(),
+            .max_scrollback = opts.full_config.@"scrollback-limit",
+            .scrollback_window_limit = opts.full_config.@"scrollback-window-limit",
             .default_modes = default_modes,
             .colors = .{
                 .background = .init(opts.config.background.toTerminalRGB()),

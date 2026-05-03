@@ -1,3 +1,35 @@
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const ArenaAllocator = std.heap.ArenaAllocator;
+const builtin = @import("builtin");
+
+const help_strings = @import("help_strings");
+
+const build_config = @import("../build_config.zig");
+const cli = @import("../cli.zig");
+const deepEqual = @import("../datastruct/comparison.zig").deepEqual;
+const fontpkg = @import("../font/main.zig");
+const MetricModifier = fontpkg.Metrics.Modifier;
+const inputpkg = @import("../input.zig");
+const KeyRemapSet = @import("../input/key_mods.zig").RemapSet;
+const internal_os = @import("../os/main.zig");
+const assert = @import("../quirks.zig").inlineAssert;
+pub const WindowPaddingBalance = @import("../renderer/size.zig").PaddingBalance;
+const ClipboardCodepointMap = @import("ClipboardCodepointMap.zig");
+pub const Command = @import("command.zig").Command;
+const conditional = @import("conditional.zig");
+const Conditional = conditional.Conditional;
+const file_load = @import("file_load.zig");
+const formatterpkg = @import("formatter.zig");
+pub const Key = @import("key.zig").Key;
+pub const Path = @import("path.zig").Path;
+pub const RepeatablePath = @import("path.zig").RepeatablePath;
+const RepeatableReadableIO = @import("io.zig").RepeatableReadableIO;
+const RepeatableStringMap = @import("RepeatableStringMap.zig");
+const string = @import("string.zig");
+const themepkg = @import("theme.zig");
+const url = @import("url.zig");
+
 /// Config is the main config struct. These fields map directly to the
 /// CLI flag names hence we use a lot of `@""` syntax to support hyphens.
 
@@ -10,38 +42,7 @@
 
 const Config = @This();
 
-const std = @import("std");
-const builtin = @import("builtin");
-const build_config = @import("../build_config.zig");
-const assert = @import("../quirks.zig").inlineAssert;
-const Allocator = std.mem.Allocator;
-const ArenaAllocator = std.heap.ArenaAllocator;
 const global_state = &@import("../global.zig").state;
-const deepEqual = @import("../datastruct/comparison.zig").deepEqual;
-const fontpkg = @import("../font/main.zig");
-const inputpkg = @import("../input.zig");
-const internal_os = @import("../os/main.zig");
-const cli = @import("../cli.zig");
-
-const conditional = @import("conditional.zig");
-const Conditional = conditional.Conditional;
-const file_load = @import("file_load.zig");
-const formatterpkg = @import("formatter.zig");
-const themepkg = @import("theme.zig");
-const url = @import("url.zig");
-pub const Key = @import("key.zig").Key;
-const MetricModifier = fontpkg.Metrics.Modifier;
-const help_strings = @import("help_strings");
-pub const Command = @import("command.zig").Command;
-const RepeatableReadableIO = @import("io.zig").RepeatableReadableIO;
-const RepeatableStringMap = @import("RepeatableStringMap.zig");
-pub const Path = @import("path.zig").Path;
-pub const RepeatablePath = @import("path.zig").RepeatablePath;
-const ClipboardCodepointMap = @import("ClipboardCodepointMap.zig");
-const KeyRemapSet = @import("../input/key_mods.zig").RemapSet;
-pub const WindowPaddingBalance = @import("../renderer/size.zig").PaddingBalance;
-const string = @import("string.zig");
-
 // We do this instead of importing all of terminal/main.zig to
 // limit the dependency graph. This is important because some things
 // like the `ghostty-build-data` binary depend on the Config but don't
@@ -1373,12 +1374,28 @@ input: RepeatableReadableIO = .{},
 /// When this limit is reached, the oldest lines are removed from the
 /// scrollback.
 ///
+/// Scrollback currently exists completely in memory. This means that the
+/// larger this value, the larger potential memory usage. Scrollback is
+/// allocated lazily up to this limit, so if you set this to a very large
+/// value, it will not immediately consume a lot of memory.
+///
 /// This size is per terminal surface, not for the entire application.
-/// The value `unlimited` uses a temporary backing store for older rows.
-/// The values `none` and `0` disable retained history.
+///
+/// It is not currently possible to set an unlimited scrollback buffer.
+/// This is a future planned feature.
 ///
 /// This can be changed at runtime but will only affect new terminal surfaces.
-@"scrollback-limit": ScrollbackLimit = .{ .bytes = 10_000_000 }, // 10MB
+@"scrollback-limit": usize = 10_000_000, // 10MB
+
+/// The size of the scrollback window in bytes that remains resident in memory.
+/// Older scrollback within `scrollback-limit` may be moved to a temporary
+/// backing store and reloaded when you scroll to it.
+///
+/// This value must be less than or equal to `scrollback-limit`. If this is 0,
+/// all retained scrollback stays resident in memory.
+///
+/// This can be changed at runtime but will only affect new terminal surfaces.
+@"scrollback-window-limit": usize = 10_000_000, // 10MB
 
 /// Control when the scrollbar is shown to scroll the scrollback buffer.
 ///
@@ -4691,6 +4708,14 @@ pub fn finalize(self: *Config) !void {
         self.@"auto-update-channel" = build_config.release_channel;
     }
 
+    if (self.@"scrollback-window-limit" > self.@"scrollback-limit") {
+        try self.addDiagnosticFmt(
+            "scrollback-window-limit must be less than or equal to scrollback-limit",
+            .{},
+        );
+        self.@"scrollback-window-limit" = self.@"scrollback-limit";
+    }
+
     self.@"faint-opacity" = std.math.clamp(self.@"faint-opacity", 0.0, 1.0);
 
     // Finalize key remapping set for efficient lookups
@@ -5269,43 +5294,6 @@ pub const LinkPreviews = enum {
     false,
     true,
     osc8,
-};
-
-pub const ScrollbackLimit = union(enum) {
-    none,
-    unlimited,
-    bytes: usize,
-
-    pub fn parseCLI(self: *ScrollbackLimit, _: Allocator, input_: ?[]const u8) !void {
-        var input = input_ orelse return error.ValueRequired;
-        input = std.mem.trim(u8, input, &std.ascii.whitespace);
-        if (input.len == 0) return error.ValueRequired;
-        if (std.mem.eql(u8, input, "none") or std.mem.eql(u8, input, "0")) {
-            self.* = .none;
-            return;
-        }
-        if (std.mem.eql(u8, input, "unlimited")) {
-            self.* = .unlimited;
-            return;
-        }
-        self.* = .{ .bytes = try std.fmt.parseInt(usize, input, 0) };
-    }
-
-    pub fn formatEntry(self: ScrollbackLimit, formatter: formatterpkg.EntryFormatter) !void {
-        switch (self) {
-            .none => try formatter.formatEntry([]const u8, "none"),
-            .unlimited => try formatter.formatEntry([]const u8, "unlimited"),
-            .bytes => |bytes| try formatter.formatEntry(usize, bytes),
-        }
-    }
-
-    pub fn maxSize(self: ScrollbackLimit) ?usize {
-        return switch (self) {
-            .none => 0,
-            .unlimited => null,
-            .bytes => |bytes| bytes,
-        };
-    }
 };
 
 /// See working-directory
