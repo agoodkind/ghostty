@@ -1373,18 +1373,12 @@ input: RepeatableReadableIO = .{},
 /// When this limit is reached, the oldest lines are removed from the
 /// scrollback.
 ///
-/// Scrollback currently exists completely in memory. This means that the
-/// larger this value, the larger potential memory usage. Scrollback is
-/// allocated lazily up to this limit, so if you set this to a very large
-/// value, it will not immediately consume a lot of memory.
-///
 /// This size is per terminal surface, not for the entire application.
-///
-/// It is not currently possible to set an unlimited scrollback buffer.
-/// This is a future planned feature.
+/// The value `unlimited` uses a temporary backing store for older rows.
+/// The values `none` and `0` disable retained history.
 ///
 /// This can be changed at runtime but will only affect new terminal surfaces.
-@"scrollback-limit": usize = 10_000_000, // 10MB
+@"scrollback-limit": ScrollbackLimit = .{ .bytes = 10_000_000 }, // 10MB
 
 /// Control when the scrollbar is shown to scroll the scrollback buffer.
 ///
@@ -5275,6 +5269,43 @@ pub const LinkPreviews = enum {
     false,
     true,
     osc8,
+};
+
+pub const ScrollbackLimit = union(enum) {
+    none,
+    unlimited,
+    bytes: usize,
+
+    pub fn parseCLI(self: *ScrollbackLimit, _: Allocator, input_: ?[]const u8) !void {
+        var input = input_ orelse return error.ValueRequired;
+        input = std.mem.trim(u8, input, &std.ascii.whitespace);
+        if (input.len == 0) return error.ValueRequired;
+        if (std.mem.eql(u8, input, "none") or std.mem.eql(u8, input, "0")) {
+            self.* = .none;
+            return;
+        }
+        if (std.mem.eql(u8, input, "unlimited")) {
+            self.* = .unlimited;
+            return;
+        }
+        self.* = .{ .bytes = try std.fmt.parseInt(usize, input, 0) };
+    }
+
+    pub fn formatEntry(self: ScrollbackLimit, formatter: formatterpkg.EntryFormatter) !void {
+        switch (self) {
+            .none => try formatter.formatEntry([]const u8, "none"),
+            .unlimited => try formatter.formatEntry([]const u8, "unlimited"),
+            .bytes => |bytes| try formatter.formatEntry(usize, bytes),
+        }
+    }
+
+    pub fn maxSize(self: ScrollbackLimit) ?usize {
+        return switch (self) {
+            .none => 0,
+            .unlimited => null,
+            .bytes => |bytes| bytes,
+        };
+    }
 };
 
 /// See working-directory

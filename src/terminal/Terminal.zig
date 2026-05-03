@@ -185,7 +185,7 @@ pub const ScrollingRegion = struct {
 pub const Options = struct {
     cols: size.CellCountInt,
     rows: size.CellCountInt,
-    max_scrollback: usize = 10_000,
+    max_scrollback: ?usize = 10_000,
     colors: Colors = .default,
 
     /// The default mode state. When the terminal gets a reset, it
@@ -2987,7 +2987,7 @@ pub fn switchScreen(self: *Terminal, key: ScreenSet.Key) !?*Screen {
                 .cols = self.cols,
                 .rows = self.rows,
                 .max_scrollback = switch (key) {
-                    .primary => primary.pages.explicit_max_size,
+                    .primary => primary.pages.configMaxSize(),
                     .alternate => 0,
                 },
 
