@@ -13,6 +13,11 @@ pub const Record = struct {
     len: usize,
 };
 
+pub const ReadError = error{
+    InvalidRecordSize,
+    UnexpectedEof,
+} || std.fs.File.PReadError;
+
 pub fn init(alloc: Allocator) !ScrollbackStore {
     var random_bytes: [16]u8 = undefined;
     const tmp_dir = temporaryDirectory();
@@ -66,7 +71,7 @@ pub fn write(self: *ScrollbackStore, bytes: []const u8) !Record {
     };
 }
 
-pub fn read(self: *ScrollbackStore, record: Record, bytes: []u8) !void {
+pub fn read(self: *ScrollbackStore, record: Record, bytes: []u8) ReadError!void {
     if (bytes.len != record.len) return error.InvalidRecordSize;
     const read_len = try self.file.preadAll(bytes, record.offset);
     if (read_len != bytes.len) return error.UnexpectedEof;

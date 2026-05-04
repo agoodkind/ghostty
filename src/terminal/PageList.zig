@@ -51,9 +51,7 @@ const Node = struct {
 
     const Unloaded = struct {
         record: ScrollbackStore.Record,
-        capacity: Capacity,
-        size: pagepkg.Size,
-        dirty: bool,
+        page: Page,
     };
 
     fn resident(self: *const Node) bool {
@@ -61,7 +59,7 @@ const Node = struct {
     }
 
     fn rowCount(self: *const Node) size.CellCountInt {
-        if (self.unloaded) |unloaded| return unloaded.size.rows;
+        if (self.unloaded) |unloaded| return unloaded.page.size.rows;
         return self.data.size.rows;
     }
 };
@@ -76,6 +74,8 @@ const std_capacity = pagepkg.std_capacity;
 
 /// The byte size required for a standard page.
 const std_size = Page.layout(std_capacity).total_size;
+
+const ResidentError = Allocator.Error || ScrollbackStore.ReadError;
 
 /// The memory pool we use for page memory buffers. We use a separate pool
 /// so we can allocate these with a page allocator. We have to use a page
@@ -1000,7 +1000,7 @@ pub const Resize = struct {
 
 /// Resize
 /// TODO: docs
-pub fn resize(self: *PageList, opts: Resize) Allocator.Error!void {
+pub fn resize(self: *PageList, opts: Resize) ResidentError!void {
     defer self.assertIntegrity();
 
     if (comptime std.debug.runtime_safety) {
@@ -1070,7 +1070,7 @@ fn resizeCols(
     self: *PageList,
     cols: size.CellCountInt,
     cursor: ?Resize.Cursor,
-) Allocator.Error!void {
+) ResidentError!void {
     assert(cols != self.cols);
 
     // Update our cols. We have to do this early because grow() that we
@@ -1170,6 +1170,7 @@ fn resizeCols(
     {
         var reflow_cursor: ReflowCursor = .init(first_rewritten_node);
         while (it.next()) |row| {
+            try self.ensureNodeResident(row.node);
             try reflow_cursor.reflowRow(self, row);
 
             // Once we're done reflowing a page, destroy it immediately.
@@ -3179,7 +3180,7 @@ pub fn unloadedRows(self: *const PageList) usize {
     var rows: usize = 0;
     var node = self.pages.first;
     while (node) |current| : (node = current.next) {
-        if (current.unloaded) |unloaded| rows += unloaded.size.rows;
+        if (current.unloaded) |unloaded| rows += unloaded.page.size.rows;
     }
     return rows;
 }
@@ -3201,9 +3202,7 @@ fn unloadNode(self: *PageList, node: *List.Node) !void {
 
     node.unloaded = .{
         .record = record,
-        .capacity = page.capacity,
-        .size = page.size,
-        .dirty = page.dirty,
+        .page = page.*,
     };
 
     if (page.memory.len <= std_size) {
@@ -3218,7 +3217,7 @@ fn unloadNode(self: *PageList, node: *List.Node) !void {
 
 fn ensureNodeResident(self: *PageList, node: *List.Node) !void {
     const unloaded = node.unloaded orelse return;
-    const layout = Page.layout(unloaded.capacity);
+    const layout = Page.layout(unloaded.page.capacity);
     const pooled = layout.total_size <= std_size;
     const page_alloc = self.pool.pages.arena.child_allocator;
 
@@ -3237,8 +3236,8 @@ fn ensureNodeResident(self: *PageList, node: *List.Node) !void {
 
     try self.scrollback_store.?.read(unloaded.record, page_buf);
 
-    node.data = .initBuf(.init(page_buf), layout);
-    node.data.size = unloaded.size;
+    node.data = unloaded.page;
+    node.data.memory = @alignCast(page_buf);
     node.data.dirty = true;
     node.unloaded = null;
     self.page_size += page_buf.len;
@@ -3326,8 +3325,6 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
 
         // Increase our total rows by one
         self.total_rows += 1;
-
-        try self.enforceResidentWindow();
 
         return null;
     }
@@ -7316,6 +7313,53 @@ test "PageList resident window marks reloaded page dirty" {
 
     try testing.expect(s.pages.first.?.resident());
     try testing.expect(s.pages.first.?.data.dirty);
+}
+
+test "PageList resident window reloads source pages during reflow resize" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try initWithScrollbackWindow(alloc, 80, 24, null, PagePool.item_size);
+    defer s.deinit();
+
+    try s.growRows(4096);
+    try testing.expect(s.unloadedRows() > 0);
+
+    try s.resize(.{ .cols = 40 });
+
+    try testing.expectEqual(@as(size.CellCountInt, 40), s.cols);
+}
+
+test "PageList resident window reloads styled source pages during reflow resize" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try initWithScrollbackWindow(alloc, 80, 24, null, PagePool.item_size);
+    defer s.deinit();
+
+    const first = s.pages.first.?;
+    const style: stylepkg.Style = .{ .flags = .{ .bold = true } };
+    const style_id = try first.data.styles.add(first.data.memory, style);
+    const rac = first.data.getRowAndCell(0, 0);
+    rac.cell.* = .{
+        .content_tag = .codepoint,
+        .content = .{ .codepoint = 'S' },
+        .style_id = style_id,
+    };
+    rac.row.styled = true;
+
+    try s.growRows(4096);
+    try testing.expect(s.unloadedRows() > 0);
+    try s.resize(.{ .cols = 40 });
+
+    const resized_rac = s.pages.first.?.data.getRowAndCell(0, 0);
+    const resized_style_id = resized_rac.cell.style_id;
+    try testing.expect(resized_style_id != stylepkg.default_id);
+    const resized_style = s.pages.first.?.data.styles.get(
+        s.pages.first.?.data.memory,
+        resized_style_id,
+    );
+    try testing.expect(resized_style.flags.bold);
 }
 
 test "PageList resident window reset clears unloaded state" {
