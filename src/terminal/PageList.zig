@@ -5295,9 +5295,10 @@ fn growRows(self: *PageList, n: usize) Allocator.Error!void {
 
 /// Clear all dirty bits on all pages. This is not efficient since it
 /// traverses the entire list of pages. This is used for testing/debugging.
-pub fn clearDirty(self: *const PageList) void {
+pub fn clearDirty(self: *PageList) void {
     var page = self.pages.first;
     while (page) |p| : (page = p.next) {
+        if (!p.resident()) continue;
         p.data.dirty = false;
         for (p.data.rows.ptr(p.data.memory)[0..p.data.size.rows]) |*row| {
             row.dirty = false;
@@ -13661,7 +13662,7 @@ test "PageList resize reflow less cols to wrap a multi-codepoint grapheme with a
         //
         // 👨‍👨‍👦‍👦👨‍👨‍👦‍👦
 
-        // First family emoji at (0)
+        // First family emoji at (0, 0)
         {
             const rac = page.getRowAndCell(0, 0);
             rac.cell.* = .{

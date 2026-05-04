@@ -13,8 +13,6 @@ const ScrollbackMemory = @This();
 
 const log = std.log.scoped(.@"scrollback-memory-bench");
 
-const MiB = 1024 * 1024;
-
 opts: Options,
 page_list: ?PageList = null,
 
@@ -59,7 +57,7 @@ fn setup(ptr: *anyopaque) Benchmark.Error!void {
         self.opts.cols,
         24,
         std.math.maxInt(usize),
-        10 * MiB,
+        10 * 1024 * 1024,
     ) catch return error.BenchmarkFailed;
 
     const pl = &self.page_list.?;
@@ -71,13 +69,11 @@ fn setup(ptr: *anyopaque) Benchmark.Error!void {
     }
 
     const fill_us = timer.read() / std.time.ns_per_us;
-    const rss_after_fill = physicalFootprintBytes();
     log.info(
-        "fill {d} rows in {d} us  RSS = {d} MiB  resident_rows = {d}  unloaded_rows = {d}  total_page_mem = {d} KiB",
+        "fill {d} rows in {d} us  resident_rows = {d}  unloaded_rows = {d}  total_page_mem = {d} KiB",
         .{
             total,
             fill_us,
-            rss_after_fill / MiB,
             pl.residentRows(),
             pl.unloadedRows(),
             pl.page_size / 1024,
@@ -112,8 +108,4 @@ fn teardown(ptr: *anyopaque) void {
         pl.deinit();
         self.page_list = null;
     }
-}
-
-fn physicalFootprintBytes() usize {
-    return 0;
 }

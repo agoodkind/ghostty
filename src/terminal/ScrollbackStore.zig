@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const osfile = @import("../os/file.zig");
 
 const ScrollbackStore = @This();
 
@@ -19,17 +20,9 @@ pub const ReadError = error{
 } || std.fs.File.PReadError;
 
 pub fn init(alloc: Allocator) !ScrollbackStore {
-    var random_bytes: [16]u8 = undefined;
-    const tmp_dir = temporaryDirectory();
-
     var attempt: usize = 0;
     while (attempt < 32) : (attempt += 1) {
-        std.crypto.random.bytes(&random_bytes);
-        const hex_name = std.fmt.bytesToHex(random_bytes, .lower);
-        const file_name = try std.fmt.allocPrint(alloc, "ghostty-scrollback-{s}", .{hex_name});
-        defer alloc.free(file_name);
-
-        const path = try std.fs.path.join(alloc, &.{ tmp_dir, file_name });
+        const path = try osfile.randomTmpPath(alloc, "ghostty-scrollback-");
         errdefer alloc.free(path);
 
         const file = std.fs.createFileAbsolute(path, .{
@@ -75,16 +68,4 @@ pub fn read(self: *ScrollbackStore, record: Record, bytes: []u8) ReadError!void 
     if (bytes.len != record.len) return error.InvalidRecordSize;
     const read_len = try self.file.preadAll(bytes, record.offset);
     if (read_len != bytes.len) return error.UnexpectedEof;
-}
-
-fn temporaryDirectory() []const u8 {
-    if (std.posix.getenv("TMPDIR")) |path| {
-        if (path.len > 0) return path;
-    }
-
-    if (std.posix.getenv("TMP")) |path| {
-        if (path.len > 0) return path;
-    }
-
-    return "/tmp";
 }
